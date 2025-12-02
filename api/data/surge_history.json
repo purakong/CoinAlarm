@@ -1,0 +1,45 @@
+{
+  "scans": [
+    {
+      "timestamp": "2025-12-01 21:32:14",
+      "surge_coins": [
+        {
+          "timeframe": "1m",
+          "count": 6,
+          "symbols": [
+            {
+              "symbol": "AIOTUSDT",
+              "time": "2025-12-01 21:06",
+              "market_cap": null
+            },
+            {
+              "symbol": "BNTUSDT",
+              "time": "2025-12-01 20:50",
+              "market_cap": 0.049487729
+            },
+            {
+              "symbol": "CLOUSDT",
+              "time": "2025-12-01 21:03",
+              "market_cap": null
+            },
+            {
+              "symbol": "DMCUSDT",
+              "time": "2025-12-01 21:14",
+              "market_cap": null
+            },
+            {
+              "symbol": "ERAUSDT",
+              "time": "2025-12-01 21:09",
+              "market_cap": 0.0
+            },
+            {
+              "symbol": "FISUSDT",
+              "time": "2025-12-01 21:15",
+              "market_cap": 0.006403451
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

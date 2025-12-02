@@ -1,0 +1,1 @@
+cd /home/purakong/workspace/CoinAlarm && source .venv/bin/activate && python -c "from core.database import CandleDatabase; db = CandleDatabase(); db.cursor.execute('TRUNCATE TABLE candles'); db.connection.commit(); print('✅ 모든 캔들 데이터 삭제 완료'); db.close()"

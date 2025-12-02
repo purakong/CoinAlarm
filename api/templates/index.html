@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>코인 거래량 급증 모니터</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .update-time {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .timeframe-section {
+            background: white;
+            margin: 20px 0;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .timeframe-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #ff6b6b;
+            margin-bottom: 15px;
+        }
+        .symbol-badge {
+            display: inline-block;
+            background: #4ecdc4;
+            color: white;
+            padding: 8px 15px;
+            margin: 5px;
+            border-radius: 5px;
+            font-weight: bold;
+            text-decoration: none;
+            transition: background 0.3s;
+        }
+        .symbol-badge:hover {
+            background: #45b7af;
+            transform: scale(1.05);
+        }
+        .symbol-info {
+            display: inline-block;
+            margin: 5px;
+            vertical-align: top;
+        }
+        .symbol-time {
+            display: block;
+            font-size: 11px;
+            color: #666;
+            margin-top: 3px;
+            font-weight: normal;
+        }
+        .symbol-market-cap {
+            display: block;
+            font-size: 10px;
+            color: #4a90e2;
+            margin-top: 2px;
+            font-weight: bold;
+        }
+        .no-data {
+            color: #999;
+            font-style: italic;
+        }
+        .refresh-btn {
+            display: block;
+            margin: 20px auto;
+            padding: 10px 30px;
+            background: #4ecdc4;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .refresh-btn:hover {
+            background: #45b7af;
+        }
+        .status-box {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .status-box .time-info {
+            font-size: 18px;
+            font-weight: bold;
+            color: #856404;
+            margin: 5px 0;
+        }
+        .status-box .countdown {
+            font-size: 24px;
+            color: #d39e00;
+            font-weight: bold;
+        }
+        .history-btn {
+            display: inline-block;
+            margin: 20px 10px;
+            padding: 10px 30px;
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .history-btn:hover {
+            background: #5a6268;
+        }
+        .history-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        .history-content {
+            background: white;
+            width: 90%;
+            max-width: 900px;
+            max-height: 80vh;
+            margin: 50px auto;
+            padding: 30px;
+            border-radius: 10px;
+            overflow-y: auto;
+        }
+        .history-item {
+            background: #f8f9fa;
+            margin: 15px 0;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #4ecdc4;
+        }
+        .history-timestamp {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .close-btn {
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            color: #999;
+            cursor: pointer;
+        }
+        .close-btn:hover {
+            color: #333;
+        }
+        .btn-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔥 코인 거래량 급증 모니터</h1>
+    <div class="update-time" id="updateTime">로딩 중...</div>
+    
+    <div class="status-box" id="statusBox">
+        <div class="time-info">⏰ 다음 스캔까지: <span class="countdown" id="countdown">-</span></div>
+        <div class="time-info">📅 다음 스캔 예정: <span id="nextRun">-</span></div>
+        <div class="time-info">📊 마지막 스캔: <span id="lastRun">-</span></div>
+    </div>
+    
+    <div class="btn-container">
+        <button class="refresh-btn" onclick="loadData()">🔄 새로고침</button>
+        <button class="history-btn" onclick="showHistory()">📜 이전 스캔 기록</button>
+    </div>
+    
+    <div id="content">로딩 중...</div>
+    
+    <!-- 이력 모달 -->
+    <div id="historyModal" class="history-modal" onclick="closeHistory(event)">
+        <div class="history-content" onclick="event.stopPropagation()">
+            <span class="close-btn" onclick="closeHistory()">&times;</span>
+            <h2>📜 스캔 이력</h2>
+            <div id="historyContent">로딩 중...</div>
+        </div>
+    </div>
+    
+    <script>
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    const countdown = document.getElementById('countdown');
+                    const nextRun = document.getElementById('nextRun');
+                    const lastRun = document.getElementById('lastRun');
+                    
+                    if (data.minutes_until_next_scan !== undefined) {
+                        countdown.innerText = data.minutes_until_next_scan + '분';
+                    }
+                    
+                    if (data.next_run) {
+                        nextRun.innerText = data.next_run;
+                    }
+                    
+                    if (data.last_run) {
+                        lastRun.innerText = data.last_run;
+                    }
+                })
+                .catch(error => console.error('Status Error:', error));
+        }
+        
+        function loadData() {
+            fetch('/api/surge')
+                .then(response => response.json())
+                .then(data => {
+                    // 업데이트 시간
+                    document.getElementById('updateTime').innerText = 
+                        '마지막 업데이트: ' + data.last_update + ' (매 5분 자동 갱신)';
+                    
+                    // 컨텐츠
+                    let html = '';
+                    
+                    if (data.surge_coins.length === 0) {
+                        html = '<div class="timeframe-section"><p class="no-data">거래량 급증 종목이 없습니다.</p></div>';
+                    } else {
+                        data.surge_coins.forEach(item => {
+                            html += `
+                                <div class="timeframe-section">
+                                    <div class="timeframe-title">
+                                        ⏰ ${item.timeframe} 시간봉 (${item.count}개)
+                                    </div>
+                                    <div>
+                                        ${item.symbols.map(s => {
+                                            const symbolName = typeof s === 'string' ? s : s.symbol;
+                                            const symbolTime = (typeof s === 'object' && s.time) ? s.time : '';
+                                            const marketCap = (typeof s === 'object' && s.market_cap !== null && s.market_cap !== undefined && typeof s.market_cap === 'number') 
+                                                ? s.market_cap.toFixed(2) + 'B' 
+                                                : '';
+                                            return `
+                                                <div class="symbol-info">
+                                                    <a href="https://www.binance.com/en/futures/${symbolName}" target="_blank" class="symbol-badge">
+                                                        ${symbolName}
+                                                        ${symbolTime ? `<span class="symbol-time">🕐 ${symbolTime}</span>` : ''}
+                                                        ${marketCap ? `<span class="symbol-market-cap">💰 ${marketCap}</span>` : ''}
+                                                    </a>
+                                                </div>
+                                            `;
+                                        }).join('')}
+                                    </div>
+                                </div>
+                            `;
+                        });
+                    }
+                    
+                    document.getElementById('content').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    document.getElementById('content').innerHTML = 
+                        '<div class="timeframe-section"><p class="no-data">데이터 로딩 실패</p></div>';
+                });
+        }
+        
+        function showHistory() {
+            document.getElementById('historyModal').style.display = 'block';
+            
+            fetch('/api/history?limit=20')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '';
+                    
+                    if (data.scans.length === 0) {
+                        html = '<p class="no-data">이력이 없습니다.</p>';
+                    } else {
+                        data.scans.forEach(scan => {
+                            html += `
+                                <div class="history-item">
+                                    <div class="history-timestamp">🕐 ${scan.timestamp}</div>
+                            `;
+                            
+                            if (scan.surge_coins.length === 0) {
+                                html += '<p class="no-data">거래량 급증 종목 없음</p>';
+                            } else {
+                                scan.surge_coins.forEach(item => {
+                                    html += `
+                                        <div style="margin-top: 10px;">
+                                            <strong>⏰ ${item.timeframe} (${item.count}개)</strong><br>
+                                            ${item.symbols.map(s => {
+                                                const symbolName = typeof s === 'string' ? s : s.symbol;
+                                                const symbolTime = (typeof s === 'object' && s.time) ? s.time : '';
+                                                const marketCap = (typeof s === 'object' && s.market_cap !== null && s.market_cap !== undefined && typeof s.market_cap === 'number') 
+                                                    ? s.market_cap.toFixed(2) + 'B' 
+                                                    : '';
+                                                return `
+                                                    <a href="https://www.binance.com/en/futures/${symbolName}" target="_blank" class="symbol-badge">
+                                                        ${symbolName}
+                                                        ${symbolTime ? `<span class="symbol-time">🕐 ${symbolTime}</span>` : ''}
+                                                        ${marketCap ? `<span class="symbol-market-cap">💰 ${marketCap}</span>` : ''}
+                                                    </a>
+                                                `;
+                                            }).join('')}
+                                        </div>
+                                    `;
+                                });
+                            }
+                            
+                            html += '</div>';
+                        });
+                    }
+                    
+                    document.getElementById('historyContent').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('History Error:', error);
+                    document.getElementById('historyContent').innerHTML = 
+                        '<p class="no-data">이력 로딩 실패</p>';
+                });
+        }
+        
+        function closeHistory(event) {
+            if (!event || event.target === document.getElementById('historyModal')) {
+                document.getElementById('historyModal').style.display = 'none';
+            }
+        }
+        
+        // 페이지 로드 시 데이터 가져오기
+        loadData();
+        updateStatus();
+        
+        // 30초마다 데이터 자동 새로고침
+        setInterval(loadData, 30000);
+        
+        // 10초마다 상태 업데이트
+        setInterval(updateStatus, 10000);
+    </script>
+</body>
+</html>
