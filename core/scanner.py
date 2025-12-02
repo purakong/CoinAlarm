@@ -51,7 +51,7 @@ class SurgeScanner:
                     },
                     "timeframes": ["1m"],
                     "filter": {
-                        "type": "3step_surge",
+                        "types": ["3step_surge"],
                         "threshold": 1.1,
                         "period": 14
                     }
@@ -67,7 +67,7 @@ class SurgeScanner:
                 },
                 "timeframes": ["1m"],
                 "filter": {
-                    "type": "3step_surge",
+                    "types": ["3step_surge"],
                     "threshold": 1.1,
                     "period": 14
                 }
@@ -163,11 +163,19 @@ class SurgeScanner:
         
         # 설정에서 필터 옵션 가져오기
         filter_config = self.config.get('filter', {})
-        filter_type = filter_config.get('type', '3step_surge')
+        # types 배열 지원 (하위 호환성을 위해 type도 지원)
+        filter_types = filter_config.get('types', filter_config.get('type', ['3step_surge', 'high_volume_spike']))
+        # 단일 값이면 리스트로 변환
+        if isinstance(filter_types, str):
+            filter_types = [filter_types]
+        
         threshold = filter_config.get('threshold', 1.1)
         period = filter_config.get('period', 14)
         window = filter_config.get('window', 30)
         range_multiplier = filter_config.get('range_multiplier', 3.0)
+        volume_range_multiplier = filter_config.get('volume_range_multiplier', 5.0)
+        
+        print(f"🔍 사용 중인 필터: {', '.join(filter_types)}")
         
         # DB 접근용 downloader 생성
         downloader = ChartDownloader(self.db_config)
@@ -180,18 +188,31 @@ class SurgeScanner:
             # 각 심볼별로 데이터를 가져와서 필터에 주입
             for symbol in symbols:
                 try:
-                    # DB에서 캔들 데이터 가져오기
-                    if filter_type == 'surge_volume' or filter_type == 'surge':
-                        candles = downloader.db.get_candles(symbol, timeframe, limit=period + 2)
-                        result = filter_obj._surge_volume_filter(candles, symbol, threshold, period)
-                        if result:
-                            surge_symbols.append({"symbol": symbol, "time": None})
-                    
-                    elif filter_type == '3step_surge':
-                        candles = downloader.db.get_candles(symbol, timeframe, limit=window + period)
-                        pattern_time = filter_obj._three_step_surge_filter(candles, symbol, threshold, period, window, range_multiplier)
-                        if pattern_time:
-                            surge_symbols.append({"symbol": symbol, "time": pattern_time})
+                    # 여러 필터 타입 순회
+                    for filter_type in filter_types:
+                        # DB에서 캔들 데이터 가져오기
+                        if filter_type == 'surge_volume' or filter_type == 'surge':
+                            candles = downloader.db.get_candles(symbol, timeframe, limit=period + 2)
+                            result = filter_obj._surge_volume_filter(candles, symbol, threshold, period)
+                            if result:
+                                surge_symbols.append({"symbol": symbol, "time": None, "filter": filter_type})
+                                break  # 하나의 필터에 걸리면 다음 심볼로
+                        
+                        elif filter_type == '3step_surge':
+                            candles = downloader.db.get_candles(symbol, timeframe, limit=window + period)
+                            pattern_time = filter_obj._three_step_surge_filter(candles, symbol, threshold, period, window, range_multiplier)
+                            if pattern_time:
+                                surge_symbols.append({"symbol": symbol, "time": pattern_time, "filter": filter_type})
+                                break  # 하나의 필터에 걸리면 다음 심볼로
+                        
+                        elif filter_type == 'high_volume_spike':
+                            if timeframe == '1m': 
+                                continue  # 1분봉은 제외
+                            candles = downloader.db.get_candles(symbol, timeframe, limit=window + period)
+                            pattern_time = filter_obj._high_volume_spike_filter(candles, symbol, period, window, volume_range_multiplier=volume_range_multiplier)
+                            if pattern_time:
+                                surge_symbols.append({"symbol": symbol, "time": pattern_time, "filter": filter_type})
+                                break  # 하나의 필터에 걸리면 다음 심볼로
                 
                 except Exception as e:
                     print(f"⚠️ {symbol} 확인 중 오류: {e}")
@@ -331,9 +352,13 @@ if __name__ == "__main__":
     threshold = 1.1
     period = 14
     window = 30
-    candles = downloader.get_candles_by_time_range('GRIFFAINUSDT', '1m', '2025-11-29 11:00:00', '2025-11-29 12:00:00', timezone='KST')
-    pattern_time = filter_obj._three_step_surge_filter(candles, 'GRIFFAINUSDT', threshold, period, window, start_time='2025-11-29 11:00:00', end_time='2025-11-29 12:00:00', timezone='KST')
-    if pattern_time:
-        print(f"패턴 발견 시간: {pattern_time}")
+    # candles = downloader.get_candles_by_time_range('GRIFFAINUSDT', '1m', '2025-11-29 11:00:00', '2025-11-29 12:00:00', timezone='KST')
+    # pattern_time = filter_obj._three_step_surge_filter(candles, 'GRIFFAINUSDT', threshold, period, window, start_time='2025-11-29 11:00:00', end_time='2025-11-29 12:00:00', timezone='KST')
+    # if pattern_time:
+    #     print(f"패턴 발견 시간: {pattern_time}")
     
+    candles = downloader.get_candles_by_time_range('PIPPINUSDT', '5m', '2025-11-21 16:00:00', '2025-11-21 17:00:00', timezone='KST')
+    pass
+    candles = downloader.get_candles_by_time_range('PIPPINUSDT', '5m', '2025-11-21 21:00:00', '2025-11-21 22:00:00', timezone='KST')
+    pass
                                                  

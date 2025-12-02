@@ -241,13 +241,25 @@
                                         ${item.symbols.map(s => {
                                             const symbolName = typeof s === 'string' ? s : s.symbol;
                                             const symbolTime = (typeof s === 'object' && s.time) ? s.time : '';
+                                            const filterType = (typeof s === 'object' && s.filter) ? s.filter : '';
                                             const marketCap = (typeof s === 'object' && s.market_cap !== null && s.market_cap !== undefined && typeof s.market_cap === 'number') 
                                                 ? s.market_cap.toFixed(2) + 'B' 
                                                 : '';
+                                            
+                                            // 필터 타입별 아이콘
+                                            let filterIcon = '';
+                                            if (filterType === '3step_surge') {
+                                                filterIcon = '🔥🔥🔥';
+                                            } else if (filterType === 'high_volume_spike') {
+                                                filterIcon = '📈';
+                                            } else if (filterType === 'surge_volume' || filterType === 'surge') {
+                                                filterIcon = '🔥';
+                                            }
+                                            
                                             return `
                                                 <div class="symbol-info">
                                                     <a href="https://www.binance.com/en/futures/${symbolName}" target="_blank" class="symbol-badge">
-                                                        ${symbolName}
+                                                        ${filterIcon} ${symbolName}
                                                         ${symbolTime ? `<span class="symbol-time">🕐 ${symbolTime}</span>` : ''}
                                                         ${marketCap ? `<span class="symbol-market-cap">💰 ${marketCap}</span>` : ''}
                                                     </a>
@@ -296,12 +308,24 @@
                                             ${item.symbols.map(s => {
                                                 const symbolName = typeof s === 'string' ? s : s.symbol;
                                                 const symbolTime = (typeof s === 'object' && s.time) ? s.time : '';
+                                                const filterType = (typeof s === 'object' && s.filter) ? s.filter : '';
                                                 const marketCap = (typeof s === 'object' && s.market_cap !== null && s.market_cap !== undefined && typeof s.market_cap === 'number') 
                                                     ? s.market_cap.toFixed(2) + 'B' 
                                                     : '';
+                                                
+                                                // 필터 타입별 아이콘
+                                                let filterIcon = '';
+                                                if (filterType === '3step_surge') {
+                                                    filterIcon = '🔥🔥🔥';
+                                                } else if (filterType === 'high_volume_spike') {
+                                                    filterIcon = '📈';
+                                                } else if (filterType === 'surge_volume' || filterType === 'surge') {
+                                                    filterIcon = '🔥';
+                                                }
+                                                
                                                 return `
                                                     <a href="https://www.binance.com/en/futures/${symbolName}" target="_blank" class="symbol-badge">
-                                                        ${symbolName}
+                                                        ${filterIcon} ${symbolName}
                                                         ${symbolTime ? `<span class="symbol-time">🕐 ${symbolTime}</span>` : ''}
                                                         ${marketCap ? `<span class="symbol-market-cap">💰 ${marketCap}</span>` : ''}
                                                     </a>

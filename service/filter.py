@@ -259,3 +259,78 @@ class Filter:
             print(f"⚠️ {symbol}: 지정된 시간대 내에서 패턴을 찾지 못했습니다.")
         
         return False
+    
+    def _high_volume_spike_filter(self, candles, symbol, period=14, window=30, volume_range_multiplier=5.0):
+        """
+        거래량 급등 패턴 찾기
+        
+        조건:
+        1. 하나의 캔들의 거래량이 14개 거래량 이동평균(MA)보다 volume_range_multiplier배 이상
+        2. 최근 window개 캔들 내에서 이런 패턴이 있는지 확인
+        
+        Args:
+            candles: 캔들 데이터 리스트 [(open_time, open, high, low, close, volume, quote_volume), ...]
+            symbol: 확인할 심볼 - 로깅용
+            period: 이동평균 계산 기간 (기본값: 14)
+            window: 검사할 캔들 윈도우 (기본값: 30)
+            volume_range_multiplier: 거래량 배수 (기본값: 5.0 = MA 대비 5배)
+        
+        Returns:
+            pattern_time: 패턴 발견 시 시작 시간 문자열, 없으면 False
+        """
+        from datetime import datetime, timedelta
+        
+        # 데이터 충분성 확인
+        if len(candles) < window + period:
+            return False
+        
+        # 최근 window개 캔들만 사용
+        recent_candles = candles[-window:]
+        base_idx_offset = len(candles) - window
+        
+        # window 내에서 각 캔들 검사
+        for i in range(len(recent_candles)):
+            candle = recent_candles[i]
+            actual_idx = base_idx_offset + i
+            
+            # 이동평균 계산에 필요한 이전 데이터가 충분한지 확인
+            if actual_idx < period:
+                continue
+            
+            # 현재 캔들 이전 period개의 거래량으로 단순 이동평균(SMA) 계산
+            prev_volumes = [float(candles[j][5]) for j in range(actual_idx - period, actual_idx)]
+            avg_volume = sum(prev_volumes) / len(prev_volumes)
+            
+            # 현재 캔들의 거래량
+            current_volume = float(candle[5])
+            
+            # 양봉 체크 (종가 > 시가)
+            is_bullish = float(candle[4]) > float(candle[1])
+            
+            if not is_bullish:
+                continue  # 양봉이 아니면 스킵
+            
+            # 거래량 급등 체크
+            if current_volume >= avg_volume * volume_range_multiplier:
+                # 패턴 발견!
+                position = len(recent_candles) - i - 1  # 현재부터 몧 개 전인지
+                
+                # 캔들의 시작 시간 (UTC → KST 변환)
+                if isinstance(candle[0], datetime):
+                    pattern_time_utc = candle[0]
+                else:
+                    pattern_time_utc = datetime.fromtimestamp(int(candle[0]) / 1000)
+                
+                # UTC → KST 변환 (+9시간)
+                pattern_time_kst = pattern_time_utc + timedelta(hours=9)
+                pattern_time = pattern_time_kst.strftime('%Y-%m-%d %H:%M')
+                
+                print(f"📈 {symbol}: 거래량 급등 패턴 발견! [시간: {pattern_time} KST]")
+                print(f"   위치: 최근 캔들에서 {position}개 전")
+                print(f"   MA{period} 거래량: {avg_volume:.2f}")
+                print(f"   현재 거래량: {current_volume:.2f} ({current_volume/avg_volume:.2f}x)")
+                print(f"   가격: {float(candle[1]):.4f}→{float(candle[4]):.4f}")
+                
+                return pattern_time
+        
+        return False
