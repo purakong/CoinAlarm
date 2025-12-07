@@ -5,6 +5,10 @@
 데이터는 외부에서 주입받아 순수 분석 로직만 수행
 """
 
+import sys,os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/../')
+from core.downloader import ChartDownloader
+
 
 class Filter:
     """
@@ -75,22 +79,72 @@ class Filter:
         
         return False
     
-    def _three_step_surge_filter(self, candles, symbol, threshold=1.0, period=14, window=30, range_multiplier=3.0, start_time=None, end_time=None, timezone='KST'):
+    def _calcualte_average_true_range(self, candles, period=14):
         """
-        3개 연속 양봉 + 거래량 급증 패턴 찾기 + 가격 변동폭 확인
+        ATR (Average True Range) 계산
+        
+        True Range는 다음 3가지 중 최댓값:
+        1. 현재 고가 - 현재 저가
+        2. |현재 고가 - 이전 종가|
+        3. |현재 저가 - 이전 종가|
+        
+        ATR은 True Range의 이동평균
+        
+        Args:
+            candles: 캔들 데이터 리스트 [(open_time, open, high, low, close, volume, quote_volume), ...]
+            period: ATR 계산 기간 (기본값: 14)
+        
+        Returns:
+            ATR 값, 데이터 부족 시 None
+        """
+        if len(candles) < period + 1:
+            return None
+        
+        true_ranges = []
+        
+        for i in range(1, len(candles)):
+            current_candle = candles[i]
+            previous_candle = candles[i - 1]
+            
+            high = float(current_candle[2])
+            low = float(current_candle[3])
+            prev_close = float(previous_candle[4])
+            
+            # True Range 계산
+            tr1 = high - low
+            tr2 = abs(high - prev_close)
+            tr3 = abs(low - prev_close)
+            
+            true_range = max(tr1, tr2, tr3)
+            true_ranges.append(true_range)
+        
+        # 최근 period개의 True Range 평균
+        if len(true_ranges) < period:
+            return None
+        
+        atr = sum(true_ranges[-period:]) / period
+        return atr
+    
+    def _three_step_surge_filter(self, candles, symbol, volume_range_multiplier, period, window, range_multiplier, strong_candle_count=0, upper_wick_ratio=0.2, lower_wick_ratio=0.1, start_time=None, end_time=None, timezone='KST'):
+        """
+        3개 연속 양봉 + 거래량 급증 패턴 찾기 + 가격 변동폭 확인 + 강한 양봉 체크
         
         조건:
         1. 3개의 연속된 캔들이 모두 양봉 (종가 > 시가)
         2. 3개의 캔들 모두 14개 평균 거래량을 넘음
         3. 최근 window개 캔들 또는 지정된 시간대 내에서 이런 패턴이 있는지 확인
+        4. (옵션) 3개 중 N개가 '꽉 찬 양봉' (꼬리가 거의 없는 강한 양봉)
         
         Args:
             candles: 캔들 데이터 리스트 [(open_time, open, high, low, close, volume, quote_volume), ...]
             symbol: 확인할 심볼 - 로깅용
-            threshold: 거래량 임계값 배수 (기본값: 1.0 = 평균 이상)
+            volume_range_multiplier: 거래량 임계값 배수 (기본값: 1.0 = 평균 이상)
             period: 평균 계산 기간 (기본값: 14)
             window: 검사할 캔들 윈도우 (기본값: 30) - start_time이 None일 때 사용
-            range_multiplier: 가격 변동폭 배수 (기본값: 3.0 = 직전 캔들 대비 3배)
+            range_multiplier: 가격 변동폭 배수 (기본값: 3.0 = ATR 대비 3배)
+            strong_candle_count: 3개 중 최소 몇 개가 '꽉 찬 양봉'이어야 하는지 (0=체크안함, 기본값: 0)
+            upper_wick_ratio: 윗꼬리 허용 비율 (고가-종가)/(고가-저가) (기본값: 0.2 = 20%)
+            lower_wick_ratio: 아래꼬리 허용 비율 (시가-저가)/(고가-저가) (기본값: 0.1 = 10%)
             start_time: 시작 시간 (datetime 객체 또는 'YYYY-MM-DD HH:MM:SS' 문자열) - 설정 시 window 무시
             end_time: 종료 시간 (datetime 객체 또는 'YYYY-MM-DD HH:MM:SS' 문자열) - start_time과 함께 사용
             timezone: 'KST' (한국시간, 기본값) 또는 'UTC' (세계시) - start_time 사용 시만 적용
@@ -98,6 +152,7 @@ class Filter:
         Returns:
             pattern_time: 패턴 발견 시 시작 시간 문자열, 없으면 False
         """
+        
         from datetime import datetime, timedelta
         
         # 시간대 모드 vs 윈도우 모드
@@ -167,6 +222,19 @@ class Filter:
             recent_candles = candles[-window:]
             base_idx_offset = len(candles) - window
         
+        # 초기 ATR 계산 (첫 번째 검사 위치용)
+        first_check_idx = base_idx_offset
+        if first_check_idx < period + 1:
+            first_check_idx = period + 1
+        
+        initial_atr_candles = candles[:first_check_idx + 1]
+        current_atr = self._calcualte_average_true_range(initial_atr_candles, period=period)
+        
+        if current_atr is None:
+            if use_timerange:
+                print(f"⚠️ {symbol}: ATR 계산 불가 (데이터 부족)")
+            return False
+        
         # window 또는 시간대 내에서 연속 3개 캔들 검사
         for i in range(len(recent_candles) - 2):
             # 연속 3개 캔들
@@ -181,6 +249,42 @@ class Filter:
             
             if not (is_bullish1 and is_bullish2 and is_bullish3):
                 continue  # 3개 모두 양봉이 아니면 스킵
+            else:
+                has_bullish = True
+            
+            # 1-1. 강한 양봉 체크 (옵션)
+            if strong_candle_count > 0:
+                strong_count = 0
+                candle_info = []  # 디버깅용
+                
+                for candle in [candle1, candle2, candle3]:
+                    open_price = float(candle[1])
+                    high_price = float(candle[2])
+                    low_price = float(candle[3])
+                    close_price = float(candle[4])
+                    
+                    total_range = high_price - low_price
+                    if total_range == 0:
+                        continue  # 변동폭이 0이면 스킵
+                    
+                    # 윗꼬리: (고가 - 종가) / (고가 - 저가)
+                    upper_wick = (high_price - close_price) / total_range
+                    # 아래꼬리: (시가 - 저가) / (고가 - 저가)
+                    lower_wick = (open_price - low_price) / total_range
+                    
+                    is_strong = (upper_wick <= upper_wick_ratio) and (lower_wick <= lower_wick_ratio)
+                    
+                    candle_info.append({
+                        'upper': upper_wick,
+                        'lower': lower_wick,
+                        'strong': is_strong
+                    })
+                    
+                    if is_strong:
+                        strong_count += 1
+                
+                if strong_count < strong_candle_count:
+                    continue  # 강한 양봉 조건 미달
             
             # 2. 각 캔들의 거래량 체크
             # 전체 candles에서의 실제 인덱스
@@ -199,33 +303,67 @@ class Filter:
             volume2 = float(candle2[5])
             volume3 = float(candle3[5])
             
-            # 3개 모두 평균 거래량 이상인지 체크
-            volume_check1 = volume1 >= avg_volume1 * threshold
-            volume_check2 = volume2 >= avg_volume1 * threshold
-            volume_check3 = volume3 >= avg_volume1 * threshold
+            # 3개 중 하나라도 평균 거래량 이상인지 체크
+            volume_check1 = volume1 >= avg_volume1 * volume_range_multiplier
+            volume_check2 = volume2 >= avg_volume1 * volume_range_multiplier
+            volume_check3 = volume3 >= avg_volume1 * volume_range_multiplier
             
             if not (volume_check1 or volume_check2 or volume_check3):
                 continue  # 거래량 조건 미달
+            else :
+                has_volume_large = True
             
-            # 3. 가격 변동폭 체크 (3개 캔들 직전 캔들 대비)
-            if actual_idx == 0:
-                continue
+            # 3. ATR 기반 가격 변동폭 체크
+            # 첫 루프이거나 이전 ATR이 있으면 점진적 업데이트
+            if i > 0 and actual_idx >= period + 1:
+                # 새로운 캔들의 True Range 계산
+                current_candle = candles[actual_idx]
+                previous_candle = candles[actual_idx - 1]
+                
+                high = float(current_candle[2])
+                low = float(current_candle[3])
+                prev_close = float(previous_candle[4])
+                
+                tr1 = high - low
+                tr2 = abs(high - prev_close)
+                tr3 = abs(low - prev_close)
+                new_tr = max(tr1, tr2, tr3)
+                
+                # 가장 오래된 TR 값 계산 (period+1개 전 캔들)
+                old_candle = candles[actual_idx - period]
+                old_prev_candle = candles[actual_idx - period - 1]
+                
+                old_high = float(old_candle[2])
+                old_low = float(old_candle[3])
+                old_prev_close = float(old_prev_candle[4])
+                
+                old_tr1 = old_high - old_low
+                old_tr2 = abs(old_high - old_prev_close)
+                old_tr3 = abs(old_low - old_prev_close)
+                old_tr = max(old_tr1, old_tr2, old_tr3)
+                
+                # ATR 점진적 업데이트: (이전 ATR * period - 가장 오래된 TR + 새로운 TR) / period
+                current_atr = (current_atr * period - old_tr + new_tr) / period
             
-            previous_candle = candles[actual_idx - 1]
-            previous_range = float(previous_candle[2]) - float(previous_candle[3])  # high - low
+            atr = current_atr
             
-            # 3개 캔들의 가격 변동폭
-            range1 = float(candle1[2]) - float(candle1[3])  # high - low
+            if atr is None or atr == 0:
+                continue  # ATR 계산 불가
+            
+            # 3개 캔들의 가격 변동폭 (high - low)
+            range1 = float(candle1[2]) - float(candle1[3])
             range2 = float(candle2[2]) - float(candle2[3])
             range3 = float(candle3[2]) - float(candle3[3])
             
-            # 최소 1개의 캔들이라도 직전 캔들의 range_multiplier배 이상 변동폭을 가져야 함
-            has_large_range = (range1 >= previous_range * range_multiplier) or (range2 >= previous_range * range_multiplier) or (range3 >= previous_range * range_multiplier)
+            # 최소 1개의 캔들이라도 ATR의 range_multiplier배 이상 변동폭을 가져야 함
+            has_large_range = (range1 >= atr * range_multiplier) or \
+                              (range2 >= atr * range_multiplier) or \
+                              (range3 >= atr * range_multiplier)
             
             if not has_large_range:
                 continue  # 가격 변동폭 조건 미달
             
-            if volume_check1 and volume_check2 and volume_check3:
+            if has_bullish and has_large_range and has_volume_large:
                 # 패턴 발견!
                 position = len(recent_candles) - i - 3  # 현재부터 몇 개 전인지
                 
@@ -247,12 +385,28 @@ class Filter:
                     print(f"🔥🔥🔥 {symbol}: 3연속 양봉+거래량 급증 패턴 발견! [시작: {pattern_time} KST]")
                     print(f"   위치: 최근 캔들에서 {position}개 전")
                 
-                print(f"   직전 캔들 변동폭: {previous_range:.4f}")
-                if previous_range == 0:
-                    previous_range = 0.0001  # 0 나누기 방지
-                print(f"   캔들1: 가격 {float(candle1[1]):.4f}→{float(candle1[4]):.4f}, 변동폭 {range1:.4f} ({range1/previous_range:.2f}x), 거래량 {volume1:.2f} ({volume1/avg_volume1:.2f}x)")
-                print(f"   캔들2: 가격 {float(candle2[1]):.4f}→{float(candle2[4]):.4f}, 변동폭 {range2:.4f} ({range2/previous_range:.2f}x), 거래량 {volume2:.2f} ({volume2/avg_volume1:.2f}x)")
-                print(f"   캔들3: 가격 {float(candle3[1]):.4f}→{float(candle3[4]):.4f}, 변동폭 {range3:.4f} ({range3/previous_range:.2f}x), 거래량 {volume3:.2f} ({volume3/avg_volume1:.2f}x)")
+                print(f"   ATR({period}): {atr:.4f}")
+                
+                # 강한 양봉 정보 출력
+                if strong_candle_count > 0 and 'candle_info' in locals():
+                    strong_candles = [idx+1 for idx, info in enumerate(candle_info) if info['strong']]
+                    print(f"   강한 양봉: {len(strong_candles)}개 (캔들 {', '.join(map(str, strong_candles))}번)")
+                
+                # 각 캔들 상세 정보
+                candle1_str = f"가격 {float(candle1[1]):.4f}→{float(candle1[4]):.4f}, 변동폭 {range1:.4f} ({range1/atr:.2f}x ATR), 거래량 {volume1:.2f} ({volume1/avg_volume1:.2f}x)"
+                if strong_candle_count > 0 and 'candle_info' in locals():
+                    candle1_str += f" [윗꼬리:{candle_info[0]['upper']*100:.1f}% 아래꼬리:{candle_info[0]['lower']*100:.1f}%]"
+                print(f"   캔들1: {candle1_str}")
+                
+                candle2_str = f"가격 {float(candle2[1]):.4f}→{float(candle2[4]):.4f}, 변동폭 {range2:.4f} ({range2/atr:.2f}x ATR), 거래량 {volume2:.2f} ({volume2/avg_volume1:.2f}x)"
+                if strong_candle_count > 0 and 'candle_info' in locals():
+                    candle2_str += f" [윗꼬리:{candle_info[1]['upper']*100:.1f}% 아래꼬리:{candle_info[1]['lower']*100:.1f}%]"
+                print(f"   캔들2: {candle2_str}")
+                
+                candle3_str = f"가격 {float(candle3[1]):.4f}→{float(candle3[4]):.4f}, 변동폭 {range3:.4f} ({range3/atr:.2f}x ATR), 거래량 {volume3:.2f} ({volume3/avg_volume1:.2f}x)"
+                if strong_candle_count > 0 and 'candle_info' in locals():
+                    candle3_str += f" [윗꼬리:{candle_info[2]['upper']*100:.1f}% 아래꼬리:{candle_info[2]['lower']*100:.1f}%]"
+                print(f"   캔들3: {candle3_str}")
                 return pattern_time
         
         if use_timerange:
@@ -260,35 +414,60 @@ class Filter:
         
         return False
     
-    def _high_volume_spike_filter(self, candles, symbol, period=14, window=30, volume_range_multiplier=5.0):
+    def _high_volume_spike_filter(self, candles, symbol, downloader:ChartDownloader, timeframe, period, window, volume_range_multiplier, spike_threshold):
         """
-        거래량 급등 패턴 찾기
+        거래량 급등 패턴 찾기 (window 내 3회 이상 발생 시에만 탐지)
         
         조건:
         1. 하나의 캔들의 거래량이 14개 거래량 이동평균(MA)보다 volume_range_multiplier배 이상
-        2. 최근 window개 캔들 내에서 이런 패턴이 있는지 확인
+        2. 최근 window개 캔들 내에서 이런 패턴이 3회 이상 발생
         
         Args:
             candles: 캔들 데이터 리스트 [(open_time, open, high, low, close, volume, quote_volume), ...]
             symbol: 확인할 심볼 - 로깅용
+            downloader: ChartDownloader 인스턴스 (데이터 부족 시 추가 다운로드용)
+            timeframe: 시간봉 (데이터 다운로드 시 필요)
             period: 이동평균 계산 기간 (기본값: 14)
             window: 검사할 캔들 윈도우 (기본값: 30)
             volume_range_multiplier: 거래량 배수 (기본값: 5.0 = MA 대비 5배)
         
         Returns:
-            pattern_time: 패턴 발견 시 시작 시간 문자열, 없으면 False
+            pattern_time: 패턴 발견 시 (3회 이상) 최초 발견 시간 문자열, 없으면 False
         """
         from datetime import datetime, timedelta
         
-        # 데이터 충분성 확인
-        if len(candles) < window + period:
-            return False
+        # 데이터 충분성 확인 및 부족 시 추가 다운로드
+        required_candles = window + period
+        if len(candles) < required_candles:
+            if downloader is None:
+                print(f"⚠️ {symbol}: 데이터 부족 (필요: {required_candles}, 현재: {len(candles)}) - downloader 없음")
+                return False
+            
+            print(f"📥 {symbol}: 데이터 부족 (필요: {required_candles}, 현재: {len(candles)}), 추가 다운로드 중...")
+            try:
+                # 추가 데이터 다운로드
+                downloader.download_and_save(symbol, timeframe, initial_limit=required_candles + 50)
+                # 다시 데이터 가져오기
+                candles = downloader.db.get_candles(symbol, timeframe, limit=required_candles)
+                
+                if len(candles) < required_candles:
+                    print(f"⚠️ {symbol}: 다운로드 후에도 데이터 부족 (현재: {len(candles)})")
+                    return False
+                
+                print(f"✅ {symbol}: 추가 데이터 다운로드 완료 (현재: {len(candles)})")
+            except Exception as e:
+                print(f"❌ {symbol}: 데이터 다운로드 실패: {e}")
+                return False
         
         # 최근 window개 캔들만 사용
         recent_candles = candles[-window:]
         base_idx_offset = len(candles) - window
         
-        # window 내에서 각 캔들 검사
+        # window 내에서 각 캔들 검사하여 급등 횟수 카운트
+        spike_count = 0
+        first_spike_time = None
+        spike_details = []  # 스파이크 상세 정보 저장
+        
         for i in range(len(recent_candles)):
             candle = recent_candles[i]
             actual_idx = base_idx_offset + i
@@ -312,8 +491,8 @@ class Filter:
             
             # 거래량 급등 체크
             if current_volume >= avg_volume * volume_range_multiplier:
-                # 패턴 발견!
-                position = len(recent_candles) - i - 1  # 현재부터 몧 개 전인지
+                spike_count += 1
+                position = len(recent_candles) - i - 1
                 
                 # 캔들의 시작 시간 (UTC → KST 변환)
                 if isinstance(candle[0], datetime):
@@ -325,12 +504,31 @@ class Filter:
                 pattern_time_kst = pattern_time_utc + timedelta(hours=9)
                 pattern_time = pattern_time_kst.strftime('%Y-%m-%d %H:%M')
                 
-                print(f"📈 {symbol}: 거래량 급등 패턴 발견! [시간: {pattern_time} KST]")
-                print(f"   위치: 최근 캔들에서 {position}개 전")
-                print(f"   MA{period} 거래량: {avg_volume:.2f}")
-                print(f"   현재 거래량: {current_volume:.2f} ({current_volume/avg_volume:.2f}x)")
-                print(f"   가격: {float(candle[1]):.4f}→{float(candle[4]):.4f}")
+                # 첫 번째 스파이크 시간 저장
+                if first_spike_time is None:
+                    first_spike_time = pattern_time
                 
-                return pattern_time
+                # 스파이크 상세 정보 저장
+                spike_details.append({
+                    'time': pattern_time,
+                    'position': position,
+                    'volume': current_volume,
+                    'avg': avg_volume,
+                    'multiplier': current_volume / avg_volume,
+                    'price_open': float(candle[1]),
+                    'price_close': float(candle[4])
+                })
+        
+        # n회 이상 급등이 발생했는지 확인
+        if spike_count >= spike_threshold:
+            print(f"📈 {symbol}: 거래량 급등 패턴 발견! (window 내 {spike_count}회 급등)")
+            print(f"   최초 급등 시간: {first_spike_time} KST")
+            print(f"   스파이크 상세:")
+            for idx, spike in enumerate(spike_details, 1):
+                print(f"     {idx}. [{spike['time']} KST] 위치: 최근 캔들에서 {spike['position']}개 전")
+                print(f"        MA{period}: {spike['avg']:.2f}, 거래량: {spike['volume']:.2f} ({spike['multiplier']:.2f}x)")
+                print(f"        가격: {spike['price_open']:.4f}→{spike['price_close']:.4f}")
+            
+            return first_spike_time
         
         return False

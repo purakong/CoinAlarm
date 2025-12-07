@@ -79,7 +79,6 @@ class CandleDatabase:
             saved_count += 1
         
         self.connection.commit()
-        print(f"✅ {saved_count}개의 캔들 데이터가 저장/업데이트 되었습니다.")
         return saved_count
     
     def get_latest_candle_time(self, symbol, timeframe):

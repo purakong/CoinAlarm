@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from apscheduler.schedulers.background import BackgroundScheduler
 from core.scanner import SurgeScanner
+from core.scheduler_state import scheduler_info
 from datetime import datetime, timedelta
 import threading
 
@@ -26,13 +27,6 @@ DB_CONFIG = {
 # 스캐너 생성
 scanner = SurgeScanner(DB_CONFIG, result_file="data/surge_results.json", history_file="data/surge_history.json")
 
-# 스케줄러 상태 정보
-scheduler_info = {
-    "next_run": None,
-    "last_run": None,
-    "interval_minutes": 30
-}
-
 
 def update_scheduler_status():
     """매 분마다 스케줄러 상태 출력"""
@@ -40,25 +34,26 @@ def update_scheduler_status():
         import time
         time.sleep(60)  # 1분 대기
         
-        if scheduler_info["next_run"]:
+        if scheduler_info["global"]["next_run"]:
             now = datetime.now()
-            time_left = scheduler_info["next_run"] - now
+            time_left = scheduler_info["global"]["next_run"] - now
             minutes_left = int(time_left.total_seconds() / 60)
             
             if minutes_left >= 0:
-                print(f"⏰ 다음 스캔까지 {minutes_left}분 남음 (예정: {scheduler_info['next_run'].strftime('%H:%M:%S')})")
+                print(f"⏰ 다음 스캔까지 {minutes_left}분 남음 (예정: {scheduler_info['global']['next_run'].strftime('%H:%M:%S')})")
             else:
                 print(f"⏰ 스캔 실행 중...")
 
 
 def scan_with_update():
     """스캔 실행 + 시간 업데이트"""
-    scheduler_info["last_run"] = datetime.now()
-    scheduler_info["next_run"] = datetime.now() + timedelta(minutes=scheduler_info["interval_minutes"])
+    scheduler_info["global"]["start_time"] = datetime.now()
+    scheduler_info["global"]["last_run"] = scheduler_info["global"]["start_time"]
+    scheduler_info["global"]["next_run"] = scheduler_info["global"]["start_time"] + timedelta(minutes=scheduler_info["global"]["interval_minutes"])
     
     print(f"\n{'='*60}")
-    print(f"🔍 스캔 시작: {scheduler_info['last_run'].strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏰ 다음 스캔: {scheduler_info['next_run'].strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔍 스캔 시작: {scheduler_info['global']['last_run'].strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏰ 다음 스캔: {scheduler_info['global']['next_run'].strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}\n")
     
     scanner.scan()
@@ -73,14 +68,14 @@ def start_scheduler():
     scheduler = BackgroundScheduler()
     
     # 매 30분마다 실행
-    scheduler.add_job(scan_with_update, 'interval', minutes=scheduler_info["interval_minutes"])
+    scheduler.add_job(scan_with_update, 'interval', minutes=scheduler_info["global"]["interval_minutes"])
     
     # 서버 시작 시 즉시 1번 실행
-    scheduler_info["next_run"] = datetime.now() + timedelta(minutes=scheduler_info["interval_minutes"])
+    scheduler_info["global"]["next_run"] = datetime.now() + timedelta(minutes=scheduler_info["global"]["interval_minutes"])
     scheduler.add_job(scan_with_update, 'date')
     
     scheduler.start()
-    print(f"✅ 스케줄러 시작: 매 {scheduler_info['interval_minutes']}분마다 거래량 급증 스캔")
+    print(f"✅ 스케줄러 시작: 매 {scheduler_info['global']['interval_minutes']}분마다 거래량 급증 스캔")
     
     # 백그라운드 스레드로 상태 모니터링 시작
     status_thread = threading.Thread(target=update_scheduler_status, daemon=True)
@@ -111,16 +106,16 @@ def get_status():
     now = datetime.now()
     status_data = {
         "mode": "rest",
-        "scan_interval": f"{scheduler_info['interval_minutes']} minutes",
+        "scan_interval": f"{scheduler_info['global']['interval_minutes']} minutes",
         "current_time": now.strftime('%Y-%m-%d %H:%M:%S'),
     }
     
-    if scheduler_info["last_run"]:
-        status_data["last_run"] = scheduler_info["last_run"].strftime('%Y-%m-%d %H:%M:%S')
+    if scheduler_info["global"]["last_run"]:
+        status_data["last_run"] = scheduler_info["global"]["last_run"].strftime('%Y-%m-%d %H:%M:%S')
     
-    if scheduler_info["next_run"]:
-        status_data["next_run"] = scheduler_info["next_run"].strftime('%Y-%m-%d %H:%M:%S')
-        time_left = scheduler_info["next_run"] - now
+    if scheduler_info["global"]["next_run"]:
+        status_data["next_run"] = scheduler_info["global"]["next_run"].strftime('%Y-%m-%d %H:%M:%S')
+        time_left = scheduler_info["global"]["next_run"] - now
         minutes_left = int(time_left.total_seconds() / 60)
         status_data["minutes_until_next_scan"] = max(0, minutes_left)
     

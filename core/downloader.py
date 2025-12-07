@@ -6,6 +6,8 @@ from binance.exceptions import BinanceAPIException
 from core.database import CandleDatabase
 import requests
 import time
+import logging
+import json
 from datetime import timedelta
 import pickle
 
@@ -27,8 +29,37 @@ class ChartDownloader:
             self.db = CandleDatabase(**db_config)
         else:
             self.db = CandleDatabase()
+        
+        # 로거 설정
+        self.logger = self._setup_logger()
     
-    def download_and_save(self, symbol, timeframe, initial_limit=100):
+    def _setup_logger(self):
+        """로거 설정"""
+        logger = logging.getLogger('ChartDownloader')
+        
+        # 기존 핸들러가 없을 때만 설정
+        if not logger.handlers:
+            # config.json 로드
+            try:
+                config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                log_level = config.get('logging', {}).get('level', 'INFO')
+                log_format = config.get('logging', {}).get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            except:
+                log_level = 'INFO'
+                log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            
+            logger.setLevel(getattr(logging, log_level))
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(getattr(logging, log_level))
+            formatter = logging.Formatter(log_format)
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
+        
+        return logger
+    
+    def download_and_save(self, symbol, timeframe, initial_limit=350):
         """
         캔들 데이터를 다운로드하고 DB에 저장
         DB를 체크해서 필요한 만큼만 다운로드
@@ -36,41 +67,40 @@ class ChartDownloader:
         Args:
             symbol: 거래쌍 (예: 'BTCUSDT')
             timeframe: 시간봉 (예: '1h', '5m', '1d')
-            initial_limit: 처음 다운로드할 때 가져올 캔들 개수 (기본값: 100)
+            initial_limit: 처음 다운로드할 때 가져올 캔들 개수 (기본값: 350)
         
         Returns:
             저장된 캔들 개수
         """
         try:
-            print(f"\n📊 {symbol} ({timeframe}) 데이터 처리 시작...")
+            self.logger.debug(f"{symbol} ({timeframe}) 데이터 처리 시작")
             
             # API 요청 전 딜레이 (요청 제한 방지)
-            time.sleep(0.1)
+            time.sleep(0.05)
             
             # 1. DB에 해당 심볼의 데이터가 있는지 확인
             if self.db.check_symbol_exists(symbol, timeframe):
                 # 데이터가 있으면 업데이트만 수행
                 existing_count = self.db.get_data_count(symbol, timeframe)
-                print(f"📁 {symbol}: DB에 기존 데이터 {existing_count}개 발견")
+                self.logger.debug(f"{symbol}: DB에 기존 데이터 {existing_count}개 발견")
                 return self._update_latest_data(symbol, timeframe)
             else:
                 # 데이터가 없으면 처음부터 다운로드
-                print(f"📥 {symbol}: DB에 데이터가 없습니다. {initial_limit}개의 캔들을 다운로드합니다...")
+                self.logger.info(f"{symbol}: 신규 다운로드 ({initial_limit}개 캔들)")
                 klines = self.client.futures_klines(symbol=symbol, interval=timeframe, limit=initial_limit)
                 
                 if not klines:
-                    print(f"⚠️ {symbol}: 바이낸스에서 데이터를 가져올 수 없습니다.")
+                    self.logger.warning(f"{symbol}: 바이낸스에서 데이터를 가져올 수 없습니다")
                     return 0
                 
                 return self.db.save_candles(symbol, timeframe, klines)
                 
         except BinanceAPIException as e:
-            print(f"❌ {symbol} ({timeframe}) API 에러: {type(e).__name__}(code={e.code}): {e.message}")
-            print(f"   상세: {e.message}")
+            self.logger.error(f"{symbol} ({timeframe}) API 에러: {type(e).__name__}(code={e.code}): {e.message}")
             
             # API 제한 에러 처리 (code=-1003)
             if e.code == -1003:
-                print(f"⚠️ API 요청 제한 초과! IP 차단됨. 잠시 후 다시 시도하세요.")
+                self.logger.critical(f"API 요청 제한 초과! IP 차단됨")
                 # ban 시간 파싱 (밀리초 → 초)
                 if 'banned until' in e.message:
                     import re
@@ -80,16 +110,16 @@ class ChartDownloader:
                         ban_until_sec = ban_until_ms / 1000
                         now_sec = time.time()
                         wait_time = max(0, ban_until_sec - now_sec)
-                        print(f"   대기 시간: {wait_time:.0f}초 ({wait_time/60:.1f}분)")
+                        self.logger.critical(f"대기 시간: {wait_time:.0f}초 ({wait_time/60:.1f}분)")
             return 0
             
         except Exception as e:
-            print(f"❌ {symbol} ({timeframe}) 다운로드 실패: {e}")
+            self.logger.error(f"{symbol} ({timeframe}) 다운로드 실패: {e}")
             # 흔한 에러 케이스 안내
             if 'Invalid symbol' in str(e):
-                print(f"   → {symbol}은(는) 존재하지 않거나 상장 폐지된 심볼입니다.")
+                self.logger.warning(f"{symbol}은(는) 존재하지 않거나 상장 폐지된 심볼")
             elif 'Invalid interval' in str(e):
-                print(f"   → {timeframe}은(는) 유효하지 않은 시간봉입니다. (1m, 5m, 15m, 1h, 4h, 1d 등 사용)")
+                self.logger.warning(f"{timeframe}은(는) 유효하지 않은 시간봉")
             return 0
     
     def _update_latest_data(self, symbol, timeframe):
@@ -112,7 +142,7 @@ class ChartDownloader:
             latest_time = self.db.get_latest_candle_time(symbol, timeframe)
             
             if not latest_time:
-                print(f"⚠️ {symbol} ({timeframe}): DB에 데이터가 없습니다.")
+                self.logger.warning(f"{symbol} ({timeframe}): DB에 데이터가 없습니다")
                 return 0
             
             # DB의 UTC 시간을 UTC 타임스탬프로 변환
@@ -124,8 +154,7 @@ class ChartDownloader:
             else:
                 latest_timestamp = int(latest_time.timestamp() * 1000)
             
-            print(f"🕐 {symbol} DB 최신 데이터 (KST): {latest_time + timedelta(hours=9)}")
-            print(f"🕐 {symbol} DB 최신 데이터 (UTC): {latest_time}")
+            self.logger.debug(f"{symbol} DB 최신: KST={latest_time + timedelta(hours=9)}, UTC={latest_time}")
             
             # 최신 시간 이후의 데이터만 다운로드
             # startTime을 설정하면 그 이후의 데이터를 가져옴
@@ -137,25 +166,22 @@ class ChartDownloader:
             )
             
             if not klines:
-                print(f"✅ {symbol}: 새로운 데이터가 없습니다. DB가 최신 상태입니다.")
+                self.logger.debug(f"{symbol}: 새로운 데이터 없음 (최신 상태)")
                 return 0
             
-            print(f"📥 {symbol}: {len(klines)}개의 새로운 캔들 다운로드 완료")
+            self.logger.debug(f"{symbol}: {len(klines)}개 새 캔들 다운로드")
             return self.db.save_candles(symbol, timeframe, klines)
             
         except BinanceAPIException as e:
-            print(f"❌ {symbol} ({timeframe}) 업데이트 실패: {type(e).__name__}(code={e.code}): {e.message}")
-            print(f"   상세: {e.message}")
+            self.logger.error(f"{symbol} ({timeframe}) 업데이트 실패: {type(e).__name__}(code={e.code}): {e.message}")
             
             # API 제한 에러 처리
             if e.code == -1003:
-                print(f"⚠️ API 요청 제한 초과! 5분마다 스캔하는 것을 권장합니다.")
+                self.logger.critical(f"API 요청 제한 초과! 스캔 간격 증가 권장")
             return 0
             
         except Exception as e:
-            print(f"❌ {symbol} ({timeframe}) 업데이트 실패: {e}")
-            if hasattr(e, 'message'):
-                print(f"   상세: {e.message}")
+            self.logger.error(f"{symbol} ({timeframe}) 업데이트 실패: {e}")
             return 0
     
     def get_candles_from_db(self, symbol, timeframe, limit=100):

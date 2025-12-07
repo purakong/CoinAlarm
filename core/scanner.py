@@ -4,13 +4,16 @@
 모든 USDT 심볼의 데이터를 최신화하고 거래량 급증을 확인
 """
 import sys,os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/../')
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import os
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
+from pytz import timezone
 from core.downloader import ChartDownloader
 from service.filter import Filter
+from core.scheduler_state import scheduler_info
 
 
 class SurgeScanner:
@@ -33,45 +36,94 @@ class SurgeScanner:
             "last_update": None,
             "surge_coins": []
         }
+        
+        # 로거 설정
+        self.logger = self._setup_logger()
     
     def _load_config(self):
         """설정 파일 로드"""
         try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            else:
-                print(f"⚠️  설정 파일({self.config_file})이 없습니다. 기본값 사용")
-                return {
-                    "scanner": {
-                        "symbol_limit": 200,
-                        "batch_size": 10,
-                        "batch_delay": 1,
-                        "keep_candles": 500
-                    },
-                    "timeframes": ["1m"],
-                    "filter": {
-                        "types": ["3step_surge"],
-                        "threshold": 1.1,
-                        "period": 14
-                    }
-                }
-        except Exception as e:
-            print(f"❌ 설정 파일 로드 실패: {e}. 기본값 사용")
-            return {
-                "scanner": {
-                    "symbol_limit": 200,
-                    "batch_size": 10,
-                    "batch_delay": 1,
-                    "keep_candles": 500
-                },
-                "timeframes": ["1m"],
-                "filter": {
-                    "types": ["3step_surge"],
-                    "threshold": 1.1,
-                    "period": 14
-                }
+            if not os.path.exists(self.config_file):
+                self.logger.critical(f"❌ 설정 파일({self.config_file})이 없습니다.")
+                self.logger.critical("설정 파일을 작성하시오!!. 프로그램이 종료됩니다.")
+                exit()
+            
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # 필수 키 검증
+            required_keys = {
+                'scanner': ['symbol_limit', 'batch_size', 'batch_delay', 'keep_candles'],
+                'tot_timeframes': None,  # 리스트 타입
+                'filter': None  # 리스트 타입, 하위 검증 필요
             }
+            
+            # 최상위 키 검증
+            for key in required_keys.keys():
+                if key not in config:
+                    self.logger.critical(f"❌ 설정 파일에 필수 키 '{key}'가 없습니다.")
+                    self.logger.critical("설정 파일을 확인하시오!!. 프로그램이 종료됩니다.")
+                    exit()
+            
+            # scanner 하위 키 검증
+            for sub_key in required_keys['scanner']:
+                if sub_key not in config['scanner']:
+                    self.logger.critical(f"❌ 설정 파일의 'scanner'에 필수 키 '{sub_key}'가 없습니다.")
+                    self.logger.critical("설정 파일을 확인하시오!!. 프로그램이 종료됩니다.")
+                    exit()
+            
+            # filter 배열 검증
+            if not isinstance(config['filter'], list) or len(config['filter']) == 0:
+                self.logger.critical(f"❌ 설정 파일의 'filter'는 비어있지 않은 배열이어야 합니다.")
+                self.logger.critical("설정 파일을 확인하시오!!. 프로그램이 종료됩니다.")
+                exit()
+            
+            # 각 필터 설정 검증
+            filter_required_keys = ['types', 'using_timeframe', 'interval', 'period', 'window']
+            for i, filter_config in enumerate(config['filter']):
+                for key in filter_required_keys:
+                    if key not in filter_config:
+                        self.logger.critical(f"❌ 설정 파일의 filter[{i}]에 필수 키 '{key}'가 없습니다.")
+                        self.logger.critical("설정 파일을 확인하시오!!. 프로그램이 종료됩니다.")
+                        exit()
+            
+            return config
+
+        except json.JSONDecodeError as e:
+            self.logger.critical(f"❌ 설정 파일 JSON 형식 오류: {e}")
+            self.logger.critical("설정 파일을 확인하시오!!. 프로그램이 종료됩니다.")
+            exit()
+        except Exception as e:
+            self.logger.critical(f"❌ 설정 파일 로드 실패: {e}")
+            self.logger.critical("설정 파일을 확인하시오!!. 프로그램이 종료됩니다.")
+            exit()
+            
+    def _setup_logger(self):
+        """로거 설정"""
+        logger = logging.getLogger('SurgeScanner')
+        
+        # 기존 핸들러 제거 (중복 방지)
+        if logger.handlers:
+            logger.handlers.clear()
+        
+        # 로그 레벨 설정
+        log_level = self.config.get('logging', {}).get('level', 'INFO')
+        logger.setLevel(getattr(logging, log_level))
+        
+        # 콘솔 핸들러
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, log_level))
+        
+        # 포맷 설정
+        log_format = self.config.get('logging', {}).get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter(log_format)
+        console_handler.setFormatter(formatter)
+        
+        logger.addHandler(console_handler)
+        return logger
+    
+    def _get_current_time(self):
+        return datetime.now()
     
     def scan(self):
         """
@@ -81,160 +133,271 @@ class SurgeScanner:
         3. 오래된 데이터 정리
         4. 결과 저장
         """
-        print("\n" + "="*50)
-        print(f"🔍 거래량 급증 스캔 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*50)
+        self.logger.info("="*50)
+        self.logger.info(f"거래량 급증 스캔 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.info("="*50)
         
-        try:
-            # 다운로더와 필터 생성
-            downloader = ChartDownloader(self.db_config)
-            filter_obj = Filter()  # DB 의존성 제거
-            
-            # 설정에서 limit 값 가져오기
-            symbol_limit = self.config.get('scanner', {}).get('symbol_limit', None)
-            
-            # 모든 USDT 심볼 가져오기
-            all_symbols = downloader.get_all_usdt_symbols(limit=symbol_limit)
-            print(f"📊 총 {len(all_symbols)}개 심볼 확인 중... (설정: {symbol_limit if symbol_limit else '전체'})")
-            # all_symbols = ['GRIFFAINUSDT']
-            
-            # 확인할 시간봉들 (설정에서 가져오기)
-            timeframes = self.config.get('timeframes', ['1m'])
-            
-            # 1단계: 데이터 최신화
-            self._update_data(downloader, all_symbols, timeframes)
-            
-            # 2단계: 거래량 급증 필터링
-            surge_data = self._filter_surge(filter_obj, all_symbols, timeframes)
-            
-            # 3단계: 오래된 데이터 정리
-            self._cleanup_old_data(downloader)
-            
-            # 결과 저장
-            self._save_results(surge_data)
-            
-            # 연결 종료
-            downloader.close()
-            
-            print(f"\n✅ 스캔 완료! 결과가 {self.result_file}에 저장되었습니다.")
-            
-        except Exception as e:
-            print(f"❌ 스캔 중 오류 발생: {e}")
+        # 다운로더와 필터 생성
+        downloader = ChartDownloader(self.db_config)
+        filter_obj = Filter()  # DB 의존성 제거
+        
+        # 설정에서 limit 값 가져오기
+        symbol_limit = self.config.get('scanner').get('symbol_limit')
+        
+        # 모든 USDT 심볼 가져오기
+        all_symbols = downloader.get_all_usdt_symbols(limit=symbol_limit)
+        self.logger.info(f"총 {len(all_symbols)}개 심볼 확인 중 (설정: {symbol_limit if symbol_limit else '전체'})")
+        
+        # 확인할 시간봉들 (설정에서 가져오기)
+        timeframes = self.config.get('tot_timeframes')
+        
+        # 1단계: 데이터 최신화
+        self._update_data(downloader, all_symbols, timeframes)
+        
+        # 2단계: 거래량 급증 필터링
+        surge_data = self.apply_filter(filter_obj, all_symbols)
+        
+        # 3단계: 오래된 데이터 정리
+        self._cleanup_old_data(downloader)
+        
+        # 결과 저장
+        self._save_results(surge_data)
+        
+        # 연결 종료
+        downloader.close()
+        
+        self.logger.info(f"스캔 완료! 결과가 {self.result_file}에 저장되었습니다")
     
     def _update_data(self, downloader:ChartDownloader, symbols, timeframes):
         """
         모든 심볼의 데이터 최신화
         배치 처리로 API 제한 방지
         """
-        print(f"\n📥 데이터 최신화 중...")
+        self.logger.info("데이터 최신화 시작")
         update_count = 0
         batch_size = self.config.get('scanner', {}).get('batch_size', 10)
+        batch_delay = self.config.get('scanner', {}).get('batch_delay', 1)
         
         for timeframe in timeframes:
-            print(f"  ⏰ {timeframe} 시간봉 업데이트...")
+            self.logger.info(f"{timeframe} 시간봉 업데이트 시작")
             
             # 심볼을 배치로 나누기
+            total_batches = (len(symbols) - 1) // batch_size + 1
             for i in range(0, len(symbols), batch_size):
                 batch = symbols[i:i+batch_size]
+                batch_num = i // batch_size + 1
                 
-                print(f"    배치 {i//batch_size + 1}/{(len(symbols)-1)//batch_size + 1} 처리 중... ({len(batch)}개 심볼)")
+                self.logger.info(f"{timeframe} 배치 {batch_num}/{total_batches} 처리 중 ({len(batch)}개 심볼)")
                 
                 for symbol in batch:
                     try:
-                        downloader.download_and_save(symbol, timeframe, initial_limit=100)
+                        downloader.download_and_save(symbol, timeframe, initial_limit=350)
                         update_count += 1
                         
                     except Exception as e:
-                        # 에러 발생해도 계속 진행
-                        pass
+                        self.logger.error(f"{symbol} 업데이트 실패: {e}")
                 
                 # 배치 간 딜레이 (API 제한 방지)
                 import time
-                batch_delay = self.config.get('scanner', {}).get('batch_delay', 1)
                 time.sleep(batch_delay)
         
-        print(f"✅ 데이터 업데이트 완료! (총 {update_count}개 업데이트)")
+        self.logger.info(f"데이터 업데이트 완료 (총 {update_count}개)")
 
-    def _filter_surge(self, filter_obj:Filter, symbols, timeframes):
+    def _check_filter_scheduling(self, filter_configs):
+        """
+        필터 스케줄링 확인 및 트리거 설정
+        
+        Args:
+            filter_configs: 필터 설정 리스트
+        """
+        current_time = self._get_current_time()
+        
+        for filter_config in filter_configs:
+            filter_type = filter_config.get('types')
+            interval = filter_config.get('interval')
+            filter_enable = filter_config.get('enable')
+            
+            if filter_type is None or interval is None:
+                self.logger.warning(f"⚠️ 필터 설정 오류: 'types' 또는 'interval' 누락")
+                continue
+            
+            if filter_enable is False:
+                self.logger.info(f"⏸️ 필터 '{filter_type}' 비활성화됨, 스케줄링 건너뜀")
+                continue
+            
+            # interval 파싱
+            try:
+                if interval.endswith('m'):
+                    minutes = int(interval.replace('m', ''))
+                elif interval.endswith('h'):
+                    minutes = int(interval.replace('h', '')) * 60
+                elif interval.endswith('d'):
+                    minutes = int(interval.replace('d', '')) * 1440
+                else:
+                    self.logger.warning(f"⚠️ 필터 '{filter_type}': interval 형식 오류 ('{interval}'). 'm', 'h', 'd' 단위를 사용하세요.")
+                    continue
+            except ValueError:
+                self.logger.warning(f"⚠️ 필터 '{filter_type}': interval 값 변환 실패 ('{interval}')")
+                continue
+            
+            # scheduler_info에 필터 타입이 없으면 초기화
+            if filter_type not in scheduler_info:
+                scheduler_info[filter_type] = {
+                    'start_time': None,
+                    'elapsed_time': timedelta(0),
+                    'trigger': False
+                }
+                self.logger.info(f"🆕 필터 '{filter_type}' 스케줄러 초기화")
+            
+            # start_time이 None이면 최초 실행
+            if scheduler_info[filter_type]['start_time'] is None:
+                scheduler_info[filter_type]['start_time'] = current_time
+                scheduler_info[filter_type]['trigger'] = True
+                self.logger.info(f"✅ 필터 '{filter_type}' 최초 실행 트리거 (interval: {interval})")
+            else:
+                # 경과 시간 계산
+                elapsed_time = current_time - scheduler_info[filter_type]['start_time']
+                scheduler_info[filter_type]['elapsed_time'] = elapsed_time
+                
+                # interval 이상 경과했으면 트리거
+                if elapsed_time >= timedelta(minutes=minutes):
+                    scheduler_info[filter_type]['start_time'] = current_time
+                    scheduler_info[filter_type]['trigger'] = True
+                    self.logger.info(f"✅ 필터 '{filter_type}' 트리거 (경과: {int(elapsed_time.total_seconds()/60)}분, interval: {interval})")
+                else:
+                    scheduler_info[filter_type]['trigger'] = False
+                    remaining = timedelta(minutes=minutes) - elapsed_time
+                    self.logger.info(f"⏭️  필터 '{filter_type}' 대기 중 (남은 시간: {int(remaining.total_seconds()/60)}분/{interval})")
+    def apply_filter(self, filter_obj:Filter, symbols):
         """
         거래량 급증 필터링
         """
         surge_data = []
         
-        # 설정에서 필터 옵션 가져오기
-        filter_config = self.config.get('filter', {})
-        # types 배열 지원 (하위 호환성을 위해 type도 지원)
-        filter_types = filter_config.get('types', filter_config.get('type', ['3step_surge', 'high_volume_spike']))
-        # 단일 값이면 리스트로 변환
-        if isinstance(filter_types, str):
-            filter_types = [filter_types]
+        # 설정에서 필터 배열 가져오기
+        filter_configs = self.config.get('filter', [])
         
-        threshold = filter_config.get('threshold', 1.1)
-        period = filter_config.get('period', 14)
-        window = filter_config.get('window', 30)
-        range_multiplier = filter_config.get('range_multiplier', 3.0)
-        volume_range_multiplier = filter_config.get('volume_range_multiplier', 5.0)
+        # 하위 호환성: filter가 dict면 리스트로 변환
+        if isinstance(filter_configs, dict):
+            filter_configs = [filter_configs]
         
-        print(f"🔍 사용 중인 필터: {', '.join(filter_types)}")
+        # 필터 이름들 출력
+        filter_names = [f.get('types', 'unknown') for f in filter_configs]
+        self.logger.info(f"🔍 사용 중인 필터: {', '.join(filter_names)}")
         
-        # DB 접근용 downloader 생성
         downloader = ChartDownloader(self.db_config)
+            
+        surge_symbols = []
         
-        for timeframe in timeframes:
-            print(f"\n🔍 {timeframe} 시간봉 필터링 중...")
+        # 필터 스케줄링 확인
+        self._check_filter_scheduling(filter_configs)
+        
+        # 트리거된 필터들 확인
+        triggered_filters = {}
+        for filter_config in filter_configs:
+            filter_type = filter_config.get('types')
+            if filter_type in scheduler_info:
+                if scheduler_info[filter_type].get('trigger', False):
+                    triggered_filters[filter_type] = filter_config
+        
+        if not triggered_filters:
+            self.logger.info("트리거된 필터가 없습니다. 모든 필터가 대기 중입니다.")
+            downloader.close()
+            return surge_data
+        
+        self.logger.info(f"트리거된 필터: {', '.join(triggered_filters.keys())}")
+        
+        # 각 심볼별로 데이터를 가져와서 필터에 주입
+        for symbol in symbols:
+            try:
+                # 트리거된 필터들만 실행
+                for filter_type, filter_config in triggered_filters.items():
+                    
+                    if filter_type == '3step_surge':
+                        # 해당 필터 설정 값들 가져오기
+                        filter_timeframes:list = filter_config.get('using_timeframe')
+                        volume_range_multiplier = filter_config.get('volume_range_multiplier')
+                        period = filter_config.get('period')
+                        window = filter_config.get('window')
+                        range_multiplier = filter_config.get('range_multiplier')
+                        strong_candle_count = filter_config.get('strong_candle_count', 0)
+                        upper_wick_ratio = filter_config.get('upper_wick_ratio', 0.2)
+                        lower_wick_ratio = filter_config.get('lower_wick_ratio', 0.1)
+
+                        for timeframe in filter_timeframes:
+                            candles = downloader.db.get_candles(symbol, timeframe, limit=window + period + 1)
+                            pattern_time = filter_obj._three_step_surge_filter(
+                                candles, symbol, volume_range_multiplier, period, window, range_multiplier,
+                                strong_candle_count=strong_candle_count,
+                                upper_wick_ratio=upper_wick_ratio,
+                                lower_wick_ratio=lower_wick_ratio
+                            )
+                            if pattern_time:
+                                surge_symbols.append({
+                                    "symbol": symbol, 
+                                    "time": pattern_time, 
+                                    "filter": filter_type,
+                                    "timeframe": timeframe
+                                })
+                                break  # 하나의 필터에 걸리면 다음 심볼로
+                    
+                    elif filter_type == 'high_volume_spike':
+                        # 해당 필터 설정 값들 가져오기
+                        filter_timeframes:list = filter_config.get('using_timeframe')
+                        period = filter_config.get('period')
+                        window = filter_config.get('window')
+                        volume_range_multiplier = filter_config.get('volume_range_multiplier')
+                        spike_threshold = filter_config.get('spike_threshold')
+                        
+                        for timeframe in filter_timeframes:
+                            candles = downloader.db.get_candles(symbol, timeframe, limit=window + period + 1)
+                            pattern_time = filter_obj._high_volume_spike_filter(candles, symbol, downloader=downloader, timeframe=timeframe, period=period, window=window, volume_range_multiplier=volume_range_multiplier, spike_threshold=spike_threshold)
+                            if pattern_time:
+                                surge_symbols.append({
+                                    "symbol": symbol, 
+                                    "time": pattern_time, 
+                                    "filter": filter_type,
+                                    "timeframe": timeframe
+                                })
+                                break  # 하나의 필터에 걸리면 다음 심볼로
             
-            surge_symbols = []
+            except Exception as e:
+                self.logger.warning(f"⚠️ {symbol} 확인 중 오류: {e}")
+        
+        # 필터 실행 완료 후 trigger를 False로 설정
+        for filter_type in triggered_filters.keys():
+            scheduler_info[filter_type]['trigger'] = False
+            self.logger.debug(f"필터 '{filter_type}' 실행 완료, trigger=False 설정")
+        
+        if surge_symbols:
+            self.logger.info(f"🔥 총 {len(surge_symbols)}개 심볼 발견")
             
-            # 각 심볼별로 데이터를 가져와서 필터에 주입
-            for symbol in symbols:
+            # 시가총액 정보 추가
+            self.logger.info(f"💰 시가총액 정보 가져오는 중...")
+            for symbol_info in surge_symbols:
                 try:
-                    # 여러 필터 타입 순회
-                    for filter_type in filter_types:
-                        # DB에서 캔들 데이터 가져오기
-                        if filter_type == 'surge_volume' or filter_type == 'surge':
-                            candles = downloader.db.get_candles(symbol, timeframe, limit=period + 2)
-                            result = filter_obj._surge_volume_filter(candles, symbol, threshold, period)
-                            if result:
-                                surge_symbols.append({"symbol": symbol, "time": None, "filter": filter_type})
-                                break  # 하나의 필터에 걸리면 다음 심볼로
-                        
-                        elif filter_type == '3step_surge':
-                            candles = downloader.db.get_candles(symbol, timeframe, limit=window + period)
-                            pattern_time = filter_obj._three_step_surge_filter(candles, symbol, threshold, period, window, range_multiplier)
-                            if pattern_time:
-                                surge_symbols.append({"symbol": symbol, "time": pattern_time, "filter": filter_type})
-                                break  # 하나의 필터에 걸리면 다음 심볼로
-                        
-                        elif filter_type == 'high_volume_spike':
-                            if timeframe == '1m': 
-                                continue  # 1분봉은 제외
-                            candles = downloader.db.get_candles(symbol, timeframe, limit=window + period)
-                            pattern_time = filter_obj._high_volume_spike_filter(candles, symbol, period, window, volume_range_multiplier=volume_range_multiplier)
-                            if pattern_time:
-                                surge_symbols.append({"symbol": symbol, "time": pattern_time, "filter": filter_type})
-                                break  # 하나의 필터에 걸리면 다음 심볼로
-                
+                    market_cap = downloader.get_market_cap(symbol_info['symbol'])
+                    symbol_info['market_cap'] = market_cap
                 except Exception as e:
-                    print(f"⚠️ {symbol} 확인 중 오류: {e}")
+                    self.logger.warning(f"⚠️ {symbol_info['symbol']} 시가총액 조회 실패: {e}")
+                    symbol_info['market_cap'] = None
             
-            if surge_symbols:
-                print(f"🔥 {timeframe}: {len(surge_symbols)}개 발견")
-                
-                # 시가총액 정보 추가
-                print(f"💰 시가총액 정보 가져오는 중...")
-                for symbol_info in surge_symbols:
-                    try:
-                        market_cap = downloader.get_market_cap(symbol_info['symbol'])
-                        symbol_info['market_cap'] = market_cap
-                    except Exception as e:
-                        print(f"⚠️ {symbol_info['symbol']} 시가총액 조회 실패: {e}")
-                        symbol_info['market_cap'] = None
-                
+            # timeframe별로 그룹화
+            timeframe_groups = {}
+            for symbol_info in surge_symbols:
+                tf = symbol_info['timeframe']
+                if tf not in timeframe_groups:
+                    timeframe_groups[tf] = []
+                timeframe_groups[tf].append(symbol_info)
+            
+            # surge_data 생성
+            for tf, symbols_list in timeframe_groups.items():
                 surge_data.append({
-                    "timeframe": timeframe,
-                    "count": len(surge_symbols),
-                    "symbols": surge_symbols
+                    "timeframe": tf,
+                    "count": len(symbols_list),
+                    "symbols": symbols_list
                 })
+                self.logger.info(f"🔥 {tf}: {len(symbols_list)}개 발견")
         
         downloader.close()
         return surge_data
@@ -244,13 +407,13 @@ class SurgeScanner:
         오래된 데이터 정리
         각 심볼/시간봉당 최신 N개만 유지
         """
-        print(f"\n🗑️ 오래된 데이터 정리 중...")
+        self.logger.info(f"\n🗑️ 오래된 데이터 정리 중...")
         keep_count = self.config.get('scanner', {}).get('keep_candles', 10000)
         deleted = downloader.db.cleanup_all_old_data(keep_count=keep_count)
         if deleted > 0:
-            print(f"✅ {deleted}개 오래된 캔들 삭제 완료")
+            self.logger.info(f"✅ {deleted}개 오래된 캔들 삭제 완료")
         else:
-            print(f"✅ 정리할 데이터 없음")
+            self.logger.info(f"✅ 정리할 데이터 없음")
     
     def _save_results(self, surge_data):
         """
@@ -285,8 +448,16 @@ class SurgeScanner:
             
             # 기존 이력 로드
             if os.path.exists(self.history_file):
-                with open(self.history_file, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
+                try:
+                    with open(self.history_file, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            history = json.loads(content)
+                        else:
+                            history = {"scans": []}
+                except (json.JSONDecodeError, ValueError):
+                    self.logger.warning("이력 파일이 손상되었습니다. 새로 생성합니다.")
+                    history = {"scans": []}
             else:
                 history = {"scans": []}
             
@@ -305,10 +476,10 @@ class SurgeScanner:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(history, f, ensure_ascii=False, indent=2)
             
-            print(f"📝 스캔 이력 저장 완료 (총 {len(history['scans'])}개)")
+            self.logger.info(f"📝 스캔 이력 저장 완료 (총 {len(history['scans'])}개)")
             
         except Exception as e:
-            print(f"⚠️ 이력 저장 실패: {e}")
+            self.logger.warning(f"⚠️ 이력 저장 실패: {e}")
     
     def get_latest_results(self):
         """
@@ -345,20 +516,26 @@ class SurgeScanner:
             return []
         
 if __name__ == "__main__":
+    # DB 설정 (본인 설정에 맞게 수정)
+    DB_CONFIG = {
+        'host': 'localhost',
+        'user': 'root',
+        'password': '1234',
+        'database': 'coin_chart'
+    }
+
+    # 스캐너 생성
+    scanner = SurgeScanner(DB_CONFIG, result_file="data/surge_results.json", history_file="data/surge_history.json")
     downloader = ChartDownloader()
     filter_obj = Filter()
     symbols = ['GRIFFAINUSDT']
     timeframe = '1m'
-    threshold = 1.1
+    volume_range_multiplier = 5
+    range_multiplier = 3
     period = 14
-    window = 30
-    # candles = downloader.get_candles_by_time_range('GRIFFAINUSDT', '1m', '2025-11-29 11:00:00', '2025-11-29 12:00:00', timezone='KST')
-    # pattern_time = filter_obj._three_step_surge_filter(candles, 'GRIFFAINUSDT', threshold, period, window, start_time='2025-11-29 11:00:00', end_time='2025-11-29 12:00:00', timezone='KST')
-    # if pattern_time:
-    #     print(f"패턴 발견 시간: {pattern_time}")
-    
-    candles = downloader.get_candles_by_time_range('PIPPINUSDT', '5m', '2025-11-21 16:00:00', '2025-11-21 17:00:00', timezone='KST')
-    pass
-    candles = downloader.get_candles_by_time_range('PIPPINUSDT', '5m', '2025-11-21 21:00:00', '2025-11-21 22:00:00', timezone='KST')
-    pass
-                                                 
+    window = 30 
+    candles = downloader.get_candles_by_time_range('1000LUNCUSDT', '5m', '2025-12-04 0:20:00', '2025-12-05 05:00:00', timezone='KST')
+    pattern_time = filter_obj._three_step_surge_filter(candles, '1000LUNCUSDT', volume_range_multiplier, period, window, range_multiplier, start_time='2025-12-04 22:00:00', end_time='2025-12-05 03:00:00', timezone='KST')
+    if pattern_time:
+        print(f"패턴 발견 시간: {pattern_time}")
+
